@@ -11,130 +11,67 @@ permissions:
 jobs:
   extract:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
     steps:
       - name: Install tools
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq ffmpeg curl jq
+          sudo apt-get install -y -qq imagemagick curl jq
 
-      - name: Resolve exact YouTube streams through public alternative frontends
+      - name: Download YouTube storyboard sprites
         shell: bash
         run: |
           set -u
-          mkdir -p work/videos work/logs work/json
-          PIPED=(
-            https://pipedapi.kavin.rocks
-            https://pipedapi.tokhmi.xyz
-            https://pipedapi.moomoo.me
-            https://api-piped.mha.fi
-            https://pipedapi.adminforge.de
-            https://pipedapi.pfcd.me
-            https://api.piped.yt
-            https://pipedapi.astartes.nl
-            https://pipedapi.osphost.fi
-            https://pipedapi.simpleprivacy.fr
-            https://pipedapi.drgns.space
-            https://piapi.ggtyler.dev
-            https://api.watch.pluto.lat
-          )
-          INVIDIOUS=(
-            https://yewtu.be
-            https://vid.puffyan.us
-            https://invidious.flokinet.to
-            https://invidious.projectsegfau.lt
-            https://inv.bp.projectsegfau.lt
-            https://inv.in.projectsegfau.lt
-            https://invidious.tiekoetter.com
-            https://invidious.slipfox.xyz
-            https://invidious.privacydev.net
-            https://vid.priv.au
-            https://iv.ggtyler.dev
-            https://invidious.0011.lt
-            https://inv.zzls.xyz
-            https://invidious.protokolla.fi
-          )
-
-          fetch_one() {
-            name="$1"; id="$2"; log="work/logs/${name}.log"; : > "$log"; found=''
-            echo "Video $name ($id)" | tee -a "$log"
-            for api in "${PIPED[@]}"; do
-              safe=$(echo "$api" | tr '/:.' '_')
-              json="work/json/${name}_piped_${safe}.json"
-              echo "Trying Piped $api" | tee -a "$log"
-              code=$(curl -k -A 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124 Safari/537.36' \
-                -H 'Accept: application/json' -L --connect-timeout 6 --max-time 18 -sS -w '%{http_code}' \
-                "$api/streams/$id" -o "$json" || true)
-              bytes=$(wc -c < "$json" 2>/dev/null || echo 0)
-              echo "HTTP $code bytes $bytes" >> "$log"
-              if jq -e '.videoStreams and (.videoStreams|length>0)' "$json" >/dev/null 2>&1; then
-                echo "Title: $(jq -r '.title // empty' "$json")" >> "$log"
-                url=$(jq -r '[.videoStreams[] | select(.mimeType=="video/mp4" and .videoOnly==false)] | sort_by(.height,.bitrate) | last | .url // empty' "$json")
-                [ -z "$url" ] && url=$(jq -r '[.videoStreams[] | select(.mimeType=="video/mp4")] | sort_by(.height,.bitrate) | last | .url // empty' "$json")
-                if [ -n "$url" ]; then
-                  echo "Resolved via $api" | tee -a "$log"
-                  curl -k -A 'Mozilla/5.0' -L --connect-timeout 10 --max-time 300 --retry 2 "$url" -o "work/videos/${name}.mp4" >>"$log" 2>&1 || true
-                  if ffprobe -v error "work/videos/${name}.mp4" >/dev/null 2>&1; then found='yes'; break; fi
-                  rm -f "work/videos/${name}.mp4"
-                fi
-              fi
-            done
-            if [ -z "$found" ]; then
-              for api in "${INVIDIOUS[@]}"; do
-                safe=$(echo "$api" | tr '/:.' '_')
-                json="work/json/${name}_inv_${safe}.json"
-                echo "Trying Invidious $api" | tee -a "$log"
-                code=$(curl -k -A 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124 Safari/537.36' \
-                  -H 'Accept: application/json' -L --connect-timeout 6 --max-time 18 -sS -w '%{http_code}' \
-                  "$api/api/v1/videos/$id?local=true" -o "$json" || true)
-                bytes=$(wc -c < "$json" 2>/dev/null || echo 0)
-                echo "HTTP $code bytes $bytes" >> "$log"
-                if jq -e '.formatStreams and (.formatStreams|length>0)' "$json" >/dev/null 2>&1; then
-                  echo "Title: $(jq -r '.title // empty' "$json")" >> "$log"
-                  url=$(jq -r '[.formatStreams[] | select(.container=="mp4")] | sort_by(.height) | last | .url // empty' "$json")
-                  [ -z "$url" ] && url=$(jq -r '.formatStreams[-1].url // empty' "$json")
-                  if [ -n "$url" ]; then
-                    echo "Resolved via $api" | tee -a "$log"
-                    curl -k -A 'Mozilla/5.0' -e "$api/" -L --connect-timeout 10 --max-time 300 --retry 2 "$url" -o "work/videos/${name}.mp4" >>"$log" 2>&1 || true
-                    if ffprobe -v error "work/videos/${name}.mp4" >/dev/null 2>&1; then found='yes'; break; fi
-                    rm -f "work/videos/${name}.mp4"
-                  fi
+          mkdir -p work/raw work/logs work/result
+          fetch_storyboards() {
+            name="$1"; id="$2"; mkdir -p "work/raw/$name" "work/result/$name"
+            : > "work/logs/$name.log"
+            for level in L0 L1 L2 L3; do
+              for m in $(seq 0 40); do
+                url="https://i.ytimg.com/sb/${id}/storyboard3_${level}/M${m}.jpg"
+                out="work/raw/${name}/${level}_M${m}.jpg"
+                code=$(curl -A 'Mozilla/5.0' -L --connect-timeout 10 --max-time 30 -sS -w '%{http_code}' "$url" -o "$out" || true)
+                size=$(wc -c < "$out" 2>/dev/null || echo 0)
+                echo "$level M$m HTTP $code bytes $size" >> "work/logs/$name.log"
+                if [ "$code" != "200" ] || [ "$size" -lt 1000 ]; then
+                  rm -f "$out"
+                  [ "$m" -ge 2 ] && break
                 fi
               done
-            fi
-            echo "found=$found" | tee -a "$log"
+            done
+            # Copy the highest available level to result and split 5x5 sprite tiles.
+            best=''
+            for level in L3 L2 L1 L0; do
+              if compgen -G "work/raw/${name}/${level}_M*.jpg" > /dev/null; then best="$level"; break; fi
+            done
+            echo "best_level=$best" >> "work/logs/$name.log"
+            [ -z "$best" ] && return 0
+            mkdir -p "work/result/$name/sprites" "work/result/$name/tiles"
+            cp work/raw/${name}/${best}_M*.jpg "work/result/$name/sprites/"
+            idx=0
+            for sprite in work/raw/${name}/${best}_M*.jpg; do
+              identify "$sprite" >> "work/logs/$name.log" 2>&1 || true
+              # YouTube storyboard sheets are usually 5x5. ImageMagick splits equal tiles.
+              convert "$sprite" -crop 5x5@ +repage +adjoin "work/result/$name/tiles/frame_${idx}_%02d.jpg" || true
+              idx=$((idx+1))
+            done
+            # Build an overview from all tiles.
+            montage work/result/$name/tiles/*.jpg -tile 5x -geometry +4+24 -background white "work/result/$name/overview.jpg" || true
           }
-
-          fetch_one full_example 8nhKxitUuY8
-          fetch_one exercise_3 DhsOuN6hU4c
-          find work/videos -maxdepth 1 -type f -printf '%f %s bytes\n' | sort | tee work/downloaded_files.txt
-
-      - name: Build visual previews
-        shell: bash
-        run: |
-          mkdir -p work/result
-          shopt -s nullglob
-          for f in work/videos/*.mp4; do
-            stem="$(basename "$f" .mp4)"; mkdir -p "work/result/${stem}"
-            cp "$f" "work/result/${stem}/${stem}_source.mp4"
-            ffprobe -v error -print_format json -show_format -show_streams "$f" >"work/result/${stem}/metadata.json"
-            ffmpeg -hide_banner -loglevel error -i "$f" -vf "fps=6,scale=800:-2:flags=lanczos,pad=800:500:(ow-iw)/2:(oh-ih)/2:white,tile=4x4" -q:v 2 "work/result/${stem}/contact_%02d.jpg"
-            ffmpeg -hide_banner -loglevel error -i "$f" -vf "fps=12,scale=960:-2:flags=lanczos" -an -c:v libx264 -crf 20 -preset veryfast -pix_fmt yuv420p "work/result/${stem}/${stem}_preview.mp4"
-          done
-          cp -r work/logs work/result/logs
-          cp -r work/json work/result/json
-          cp work/downloaded_files.txt work/result/
+          fetch_storyboards full_example 8nhKxitUuY8
+          fetch_storyboards exercise_3 DhsOuN6hU4c
           find work/result -type f -printf '%p %s bytes\n' | sort > work/result/file_list.txt
+          cp -r work/logs work/result/logs
 
       - name: Package result
         run: |
-          cd work && zip -r -q altfrontend-vault-candidates.zip result && ls -lh altfrontend-vault-candidates.zip
+          cd work && zip -r -q youtube-storyboards.zip result && ls -lh youtube-storyboards.zip
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: altfrontend-vault-candidates
-          path: work/altfrontend-vault-candidates.zip
+          name: youtube-storyboards
+          path: work/youtube-storyboards.zip
           if-no-files-found: error
           retention-days: 1
           compression-level: 1
