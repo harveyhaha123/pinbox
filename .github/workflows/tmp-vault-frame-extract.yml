@@ -18,7 +18,7 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq ffmpeg curl jq
 
-      - name: Resolve public Piped or Invidious streams
+      - name: Resolve exact YouTube streams through public alternative frontends
         shell: bash
         run: |
           set -u
@@ -27,72 +27,76 @@ jobs:
             https://pipedapi.kavin.rocks
             https://pipedapi.tokhmi.xyz
             https://pipedapi.moomoo.me
-            https://pipedapi.syncpundit.io
             https://api-piped.mha.fi
-            https://piped-api.garudalinux.org
             https://pipedapi.adminforge.de
-            https://piped-api.hostux.net
-            https://pdapi.vern.cc
+            https://pipedapi.pfcd.me
+            https://api.piped.yt
+            https://pipedapi.astartes.nl
+            https://pipedapi.osphost.fi
+            https://pipedapi.simpleprivacy.fr
+            https://pipedapi.drgns.space
+            https://piapi.ggtyler.dev
+            https://api.watch.pluto.lat
           )
           INVIDIOUS=(
-            https://inv.thepixora.com
-            https://inv.nadeko.net
-            https://invidious.nerdvpn.de
-            https://yt.chocolatemoo53.com
+            https://yewtu.be
+            https://vid.puffyan.us
+            https://invidious.flokinet.to
+            https://invidious.projectsegfau.lt
+            https://inv.bp.projectsegfau.lt
+            https://inv.in.projectsegfau.lt
             https://invidious.tiekoetter.com
+            https://invidious.slipfox.xyz
+            https://invidious.privacydev.net
+            https://vid.priv.au
+            https://iv.ggtyler.dev
+            https://invidious.0011.lt
+            https://inv.zzls.xyz
+            https://invidious.protokolla.fi
           )
 
           fetch_one() {
-            name="$1"; id="$2"
-            log="work/logs/${name}.log"
-            : > "$log"
+            name="$1"; id="$2"; log="work/logs/${name}.log"; : > "$log"; found=''
             echo "Video $name ($id)" | tee -a "$log"
-            found=''
-
             for api in "${PIPED[@]}"; do
+              safe=$(echo "$api" | tr '/:.' '_')
+              json="work/json/${name}_piped_${safe}.json"
               echo "Trying Piped $api" | tee -a "$log"
-              json="work/json/${name}_piped_$(echo "$api" | tr '/:.' '_').json"
-              code=$(curl -A 'Mozilla/5.0' -L --connect-timeout 8 --max-time 25 -sS -w '%{http_code}' \
+              code=$(curl -k -A 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124 Safari/537.36' \
+                -H 'Accept: application/json' -L --connect-timeout 6 --max-time 18 -sS -w '%{http_code}' \
                 "$api/streams/$id" -o "$json" || true)
-              echo "HTTP $code bytes $(wc -c < "$json" 2>/dev/null || echo 0)" >> "$log"
+              bytes=$(wc -c < "$json" 2>/dev/null || echo 0)
+              echo "HTTP $code bytes $bytes" >> "$log"
               if jq -e '.videoStreams and (.videoStreams|length>0)' "$json" >/dev/null 2>&1; then
-                title=$(jq -r '.title // empty' "$json")
-                echo "Title: $title" >> "$log"
-                url=$(jq -r '[.videoStreams[] | select(.mimeType=="video/mp4")] | sort_by(.height, .bitrate) | last | .url // empty' "$json")
-                if [ -z "$url" ]; then
-                  url=$(jq -r '[.videoStreams[]] | sort_by(.height, .bitrate) | last | .url // empty' "$json")
-                fi
+                echo "Title: $(jq -r '.title // empty' "$json")" >> "$log"
+                url=$(jq -r '[.videoStreams[] | select(.mimeType=="video/mp4" and .videoOnly==false)] | sort_by(.height,.bitrate) | last | .url // empty' "$json")
+                [ -z "$url" ] && url=$(jq -r '[.videoStreams[] | select(.mimeType=="video/mp4")] | sort_by(.height,.bitrate) | last | .url // empty' "$json")
                 if [ -n "$url" ]; then
-                  echo "Resolved Piped stream via $api" | tee -a "$log"
-                  if curl -A 'Mozilla/5.0' -L --connect-timeout 12 --max-time 300 --retry 2 \
-                    "$url" -o "work/videos/${name}.mp4" >> "$log" 2>&1; then
-                    if ffprobe -v error "work/videos/${name}.mp4" >/dev/null 2>&1; then
-                      found='yes'; break
-                    fi
-                  fi
+                  echo "Resolved via $api" | tee -a "$log"
+                  curl -k -A 'Mozilla/5.0' -L --connect-timeout 10 --max-time 300 --retry 2 "$url" -o "work/videos/${name}.mp4" >>"$log" 2>&1 || true
+                  if ffprobe -v error "work/videos/${name}.mp4" >/dev/null 2>&1; then found='yes'; break; fi
                   rm -f "work/videos/${name}.mp4"
                 fi
               fi
             done
-
             if [ -z "$found" ]; then
               for api in "${INVIDIOUS[@]}"; do
+                safe=$(echo "$api" | tr '/:.' '_')
+                json="work/json/${name}_inv_${safe}.json"
                 echo "Trying Invidious $api" | tee -a "$log"
-                json="work/json/${name}_inv_$(echo "$api" | tr '/:.' '_').json"
-                code=$(curl -A 'Mozilla/5.0' -L --connect-timeout 8 --max-time 25 -sS -w '%{http_code}' \
+                code=$(curl -k -A 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124 Safari/537.36' \
+                  -H 'Accept: application/json' -L --connect-timeout 6 --max-time 18 -sS -w '%{http_code}' \
                   "$api/api/v1/videos/$id?local=true" -o "$json" || true)
-                echo "HTTP $code bytes $(wc -c < "$json" 2>/dev/null || echo 0)" >> "$log"
+                bytes=$(wc -c < "$json" 2>/dev/null || echo 0)
+                echo "HTTP $code bytes $bytes" >> "$log"
                 if jq -e '.formatStreams and (.formatStreams|length>0)' "$json" >/dev/null 2>&1; then
+                  echo "Title: $(jq -r '.title // empty' "$json")" >> "$log"
                   url=$(jq -r '[.formatStreams[] | select(.container=="mp4")] | sort_by(.height) | last | .url // empty' "$json")
                   [ -z "$url" ] && url=$(jq -r '.formatStreams[-1].url // empty' "$json")
                   if [ -n "$url" ]; then
-                    echo "Resolved Invidious stream via $api" | tee -a "$log"
-                    if curl -A 'Mozilla/5.0' -L --connect-timeout 12 --max-time 300 --retry 2 \
-                      "$url" -o "work/videos/${name}.mp4" >> "$log" 2>&1; then
-                      if ffprobe -v error "work/videos/${name}.mp4" >/dev/null 2>&1; then
-                        found='yes'; break
-                      fi
-                    fi
+                    echo "Resolved via $api" | tee -a "$log"
+                    curl -k -A 'Mozilla/5.0' -e "$api/" -L --connect-timeout 10 --max-time 300 --retry 2 "$url" -o "work/videos/${name}.mp4" >>"$log" 2>&1 || true
+                    if ffprobe -v error "work/videos/${name}.mp4" >/dev/null 2>&1; then found='yes'; break; fi
                     rm -f "work/videos/${name}.mp4"
                   fi
                 fi
@@ -111,16 +115,11 @@ jobs:
           mkdir -p work/result
           shopt -s nullglob
           for f in work/videos/*.mp4; do
-            stem="$(basename "$f" .mp4)"
-            mkdir -p "work/result/${stem}"
+            stem="$(basename "$f" .mp4)"; mkdir -p "work/result/${stem}"
+            cp "$f" "work/result/${stem}/${stem}_source.mp4"
             ffprobe -v error -print_format json -show_format -show_streams "$f" >"work/result/${stem}/metadata.json"
-            ffmpeg -hide_banner -loglevel error -i "$f" \
-              -vf "fps=6,scale=800:-2:flags=lanczos,pad=800:500:(ow-iw)/2:(oh-ih)/2:white,tile=4x4" \
-              -q:v 2 "work/result/${stem}/contact_%02d.jpg"
-            ffmpeg -hide_banner -loglevel error -i "$f" \
-              -vf "fps=12,scale=960:-2:flags=lanczos" -an \
-              -c:v libx264 -crf 20 -preset veryfast -pix_fmt yuv420p \
-              "work/result/${stem}/${stem}_preview.mp4"
+            ffmpeg -hide_banner -loglevel error -i "$f" -vf "fps=6,scale=800:-2:flags=lanczos,pad=800:500:(ow-iw)/2:(oh-ih)/2:white,tile=4x4" -q:v 2 "work/result/${stem}/contact_%02d.jpg"
+            ffmpeg -hide_banner -loglevel error -i "$f" -vf "fps=12,scale=960:-2:flags=lanczos" -an -c:v libx264 -crf 20 -preset veryfast -pix_fmt yuv420p "work/result/${stem}/${stem}_preview.mp4"
           done
           cp -r work/logs work/result/logs
           cp -r work/json work/result/json
@@ -129,15 +128,13 @@ jobs:
 
       - name: Package result
         run: |
-          cd work
-          zip -r -q piped-vault-candidates.zip result
-          ls -lh piped-vault-candidates.zip
+          cd work && zip -r -q altfrontend-vault-candidates.zip result && ls -lh altfrontend-vault-candidates.zip
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: piped-vault-candidates
-          path: work/piped-vault-candidates.zip
+          name: altfrontend-vault-candidates
+          path: work/altfrontend-vault-candidates.zip
           if-no-files-found: error
           retention-days: 1
-          compression-level: 3
+          compression-level: 1
