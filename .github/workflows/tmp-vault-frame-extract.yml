@@ -11,91 +11,61 @@ permissions:
 jobs:
   extract:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 10
     steps:
       - name: Install tools
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq ffmpeg curl
+          sudo apt-get install -y -qq ffmpeg
           python -m pip install --quiet --upgrade yt-dlp
 
-      - name: Download candidate videos
-        shell: bash
+      - name: Download 45-degree school-style straddle-vault clip
         run: |
-          set -u
-          mkdir -p work/videos work/logs
-          UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36'
+          mkdir -p work
+          yt-dlp --no-playlist --socket-timeout 30 --retries 3 \
+            -f 'bestvideo[height<=1080]+bestaudio/best[height<=1080]/best' \
+            --merge-output-format mp4 \
+            -o 'work/cda_45deg.%(ext)s' \
+            'https://www.cda.pl/video/40545014f/vfilm'
+          ls -lh work
 
-          download_direct() {
-            name="$1"; url="$2"
-            echo "Downloading $name from $url" | tee "work/logs/${name}.log"
-            curl --fail --location --retry 3 --connect-timeout 20 --max-time 180 \
-              -A "$UA" -e "${url%/*}/" "$url" -o "work/videos/${name}.mp4" \
-              >>"work/logs/${name}.log" 2>&1 || true
-          }
-
-          download_ytdlp() {
-            name="$1"; url="$2"
-            echo "Downloading $name with yt-dlp from $url" | tee "work/logs/${name}.log"
-            yt-dlp --no-playlist --socket-timeout 30 --retries 3 \
-              -f 'bestvideo[height<=1080]+bestaudio/best[height<=1080]/best' \
-              --merge-output-format mp4 -o "work/videos/${name}.%(ext)s" "$url" \
-              >>"work/logs/${name}.log" 2>&1 || true
-          }
-
-          download_direct nijiiro 'https://www.nijiiro-kids-taisou-labo.com/wp-content/uploads/2021/02/open-leg-jump-of-the-vaulting-box-1.mp4'
-          download_direct machida_T4 'https://machidabunkayouchien.com/wp/wp-content/uploads/2025/06/T4.mp4'
-          download_direct machida_T5 'https://machidabunkayouchien.com/wp/wp-content/uploads/2025/06/T5.mp4'
-          download_direct machida_T6 'https://machidabunkayouchien.com/wp/wp-content/uploads/2025/06/T6.mp4'
-          download_direct houei 'https://yukiyamafukushikai.com/houei/wp/wp-content/uploads/2022/01/IMG_3449-video-converter.com_.mp4'
-          download_ytdlp cda_45deg 'https://www.cda.pl/video/40545014f/vfilm'
-          download_ytdlp youtube_XhZwuQiRcsU 'https://www.youtube.com/watch?v=XhZwuQiRcsU'
-          download_ytdlp youtube_MJrejcgzM9E 'https://www.youtube.com/watch?v=MJrejcgzM9E'
-          download_ytdlp vimeo_428979571 'https://vimeo.com/428979571'
-
-          find work/videos -type f -maxdepth 1 -printf '%f %s bytes\n' | sort | tee work/downloaded_files.txt
-
-      - name: Validate and extract frames
-        shell: bash
+      - name: Extract accurate frame sequence
         run: |
-          set -u
-          mkdir -p work/output
-          shopt -s nullglob
-          for f in work/videos/*; do
-            name="$(basename "$f")"
-            stem="${name%.*}"
-            if ! ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$f" >"work/output/${stem}_duration.txt" 2>"work/output/${stem}_ffprobe_error.txt"; then
-              echo "Skipping invalid media: $f"
-              continue
-            fi
-            mkdir -p "work/output/${stem}/frames_10fps" "work/output/${stem}/frames_24fps"
-            ffprobe -v error -print_format json -show_format -show_streams "$f" >"work/output/${stem}/metadata.json"
+          mkdir -p work/result/frames_24fps work/result/frames_native
+          cp work/cda_45deg.mp4 work/result/cda_45deg_original.mp4
+          ffprobe -v error -print_format json -show_format -show_streams \
+            work/cda_45deg.mp4 > work/result/metadata.json
 
-            ffmpeg -hide_banner -loglevel error -i "$f" \
-              -vf "fps=10,scale='min(960,iw)':-2:flags=lanczos" -q:v 2 \
-              "work/output/${stem}/frames_10fps/%04d.jpg"
+          ffmpeg -hide_banner -loglevel error -i work/cda_45deg.mp4 \
+            -vf "fps=24,scale='min(1280,iw)':-2:flags=lanczos" -q:v 1 \
+            work/result/frames_24fps/F_%04d.jpg
 
-            ffmpeg -hide_banner -loglevel error -i "$f" \
-              -vf "fps=24,scale='min(1280,iw)':-2:flags=lanczos" -q:v 2 \
-              "work/output/${stem}/frames_24fps/%05d.jpg"
+          ffmpeg -hide_banner -loglevel error -i work/cda_45deg.mp4 \
+            -vsync 0 -q:v 1 work/result/frames_native/N_%04d.jpg
 
-            ffmpeg -hide_banner -loglevel error -i "$f" \
-              -vf "fps=5,scale=480:-2:flags=lanczos,pad=480:320:(ow-iw)/2:(oh-ih)/2:white,tile=5x5" \
-              -frames:v 20 -q:v 2 "work/output/${stem}/contact_%02d.jpg" || true
+          ffmpeg -hide_banner -loglevel error -i work/cda_45deg.mp4 \
+            -vf "fps=8,scale=640:-2:flags=lanczos,pad=640:400:(ow-iw)/2:(oh-ih)/2:white,tile=4x4" \
+            -q:v 1 work/result/contact_%02d.jpg
 
-            cp "$f" "work/output/${stem}/${name}"
-          done
+          ffmpeg -hide_banner -loglevel error -i work/cda_45deg.mp4 \
+            -vf "fps=12,scale=960:-2:flags=lanczos" -an \
+            -c:v libx264 -crf 18 -preset medium -pix_fmt yuv420p \
+            work/result/cda_45deg_12fps_reference.mp4
 
-      - name: Package results
+          find work/result -maxdepth 2 -type f -printf '%p %s bytes\n' | sort > work/result/file_list.txt
+          du -sh work/result
+
+      - name: Package compact result
         run: |
           cd work
-          zip -r -q vault-candidates.zip output logs downloaded_files.txt
-          ls -lh vault-candidates.zip
+          zip -r -q vault-final-small.zip result
+          ls -lh vault-final-small.zip
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: vault-candidates
-          path: work/vault-candidates.zip
+          name: vault-final-small
+          path: work/vault-final-small.zip
           if-no-files-found: error
           retention-days: 1
+          compression-level: 6
