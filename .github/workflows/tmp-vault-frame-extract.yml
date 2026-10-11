@@ -11,61 +11,69 @@ permissions:
 jobs:
   extract:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - name: Install tools
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq ffmpeg
-          python -m pip install --quiet --upgrade yt-dlp
+          sudo apt-get install -y -qq ffmpeg curl
 
-      - name: Download 45-degree school-style straddle-vault clip
+      - name: Download candidate school-style vaulting-box clips
+        shell: bash
         run: |
-          mkdir -p work
-          yt-dlp --no-playlist --socket-timeout 30 --retries 3 \
-            -f 'bestvideo[height<=1080]+bestaudio/best[height<=1080]/best' \
-            --merge-output-format mp4 \
-            -o 'work/cda_45deg.%(ext)s' \
-            'https://www.cda.pl/video/40545014f/vfilm'
-          ls -lh work
+          set -u
+          mkdir -p work/videos work/logs
+          UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36'
+          download_direct() {
+            name="$1"; url="$2"
+            curl --fail --location --retry 3 --connect-timeout 20 --max-time 240 \
+              -A "$UA" -e "${url%/*}/" "$url" -o "work/videos/${name}.mp4" \
+              >"work/logs/${name}.log" 2>&1 || true
+          }
+          download_direct nijiiro 'https://www.nijiiro-kids-taisou-labo.com/wp-content/uploads/2021/02/open-leg-jump-of-the-vaulting-box-1.mp4'
+          download_direct machida_T4 'https://machidabunkayouchien.com/wp/wp-content/uploads/2025/06/T4.mp4'
+          download_direct machida_T5 'https://machidabunkayouchien.com/wp/wp-content/uploads/2025/06/T5.mp4'
+          download_direct machida_T6 'https://machidabunkayouchien.com/wp/wp-content/uploads/2025/06/T6.mp4'
+          download_direct houei 'https://yukiyamafukushikai.com/houei/wp/wp-content/uploads/2022/01/IMG_3449-video-converter.com_.mp4'
+          find work/videos -type f -maxdepth 1 -printf '%f %s bytes\n' | sort | tee work/downloaded_files.txt
 
-      - name: Extract accurate frame sequence
+      - name: Build lightweight visual previews
+        shell: bash
         run: |
-          mkdir -p work/result/frames_24fps work/result/frames_native
-          cp work/cda_45deg.mp4 work/result/cda_45deg_original.mp4
-          ffprobe -v error -print_format json -show_format -show_streams \
-            work/cda_45deg.mp4 > work/result/metadata.json
-
-          ffmpeg -hide_banner -loglevel error -i work/cda_45deg.mp4 \
-            -vf "fps=24,scale='min(1280,iw)':-2:flags=lanczos" -q:v 1 \
-            work/result/frames_24fps/F_%04d.jpg
-
-          ffmpeg -hide_banner -loglevel error -i work/cda_45deg.mp4 \
-            -vsync 0 -q:v 1 work/result/frames_native/N_%04d.jpg
-
-          ffmpeg -hide_banner -loglevel error -i work/cda_45deg.mp4 \
-            -vf "fps=8,scale=640:-2:flags=lanczos,pad=640:400:(ow-iw)/2:(oh-ih)/2:white,tile=4x4" \
-            -q:v 1 work/result/contact_%02d.jpg
-
-          ffmpeg -hide_banner -loglevel error -i work/cda_45deg.mp4 \
-            -vf "fps=12,scale=960:-2:flags=lanczos" -an \
-            -c:v libx264 -crf 18 -preset medium -pix_fmt yuv420p \
-            work/result/cda_45deg_12fps_reference.mp4
-
-          find work/result -maxdepth 2 -type f -printf '%p %s bytes\n' | sort > work/result/file_list.txt
+          set -u
+          mkdir -p work/result
+          shopt -s nullglob
+          for f in work/videos/*.mp4; do
+            stem="$(basename "$f" .mp4)"
+            if ! ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$f" >"work/result/${stem}_duration.txt" 2>"work/result/${stem}_error.txt"; then
+              continue
+            fi
+            mkdir -p "work/result/${stem}"
+            ffprobe -v error -print_format json -show_format -show_streams "$f" >"work/result/${stem}/metadata.json"
+            ffmpeg -hide_banner -loglevel error -i "$f" \
+              -vf "fps=5,scale=640:-2:flags=lanczos,pad=640:400:(ow-iw)/2:(oh-ih)/2:white,tile=4x4" \
+              -q:v 2 "work/result/${stem}/contact_%02d.jpg" || true
+            ffmpeg -hide_banner -loglevel error -i "$f" \
+              -vf "fps=8,scale=640:-2:flags=lanczos" -an \
+              -c:v libx264 -crf 23 -preset veryfast -pix_fmt yuv420p \
+              "work/result/${stem}/${stem}_preview.mp4" || true
+            ffmpeg -hide_banner -loglevel error -ss 0 -i "$f" -frames:v 1 -vf "scale=960:-2:flags=lanczos" -q:v 2 \
+              "work/result/${stem}/${stem}_first.jpg" || true
+          done
+          find work/result -type f -printf '%p %s bytes\n' | sort > work/result/file_list.txt
           du -sh work/result
 
-      - name: Package compact result
+      - name: Package candidate previews
         run: |
           cd work
-          zip -r -q vault-final-small.zip result
-          ls -lh vault-final-small.zip
+          zip -r -q vault-candidate-previews.zip result logs downloaded_files.txt
+          ls -lh vault-candidate-previews.zip
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: vault-final-small
-          path: work/vault-final-small.zip
+          name: vault-candidate-previews
+          path: work/vault-candidate-previews.zip
           if-no-files-found: error
           retention-days: 1
           compression-level: 6
