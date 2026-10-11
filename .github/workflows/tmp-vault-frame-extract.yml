@@ -16,35 +16,41 @@ jobs:
       - name: Install tools
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq ffmpeg curl
+          sudo apt-get install -y -qq ffmpeg
+          python -m pip install --quiet --upgrade 'yt-dlp[default,curl-cffi]'
+          yt-dlp --version
 
-      - name: Download candidate school-style vaulting-box clips
+      - name: Download Vimeo and HOS school-style vault candidates
         shell: bash
         run: |
           set -u
           mkdir -p work/videos work/logs
-          UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124 Safari/537.36'
-          download_direct() {
+          download_one() {
             name="$1"; url="$2"
-            curl --fail --location --retry 3 --connect-timeout 20 --max-time 240 \
-              -A "$UA" -e "${url%/*}/" "$url" -o "work/videos/${name}.mp4" \
-              >"work/logs/${name}.log" 2>&1 || true
+            echo "===== $name : $url =====" | tee "work/logs/${name}.log"
+            yt-dlp -v --no-playlist --socket-timeout 30 --retries 4 \
+              --impersonate chrome \
+              -f 'bestvideo[height<=1080]+bestaudio/best[height<=1080]/best' \
+              --merge-output-format mp4 \
+              -o "work/videos/${name}.%(ext)s" "$url" \
+              >>"work/logs/${name}.log" 2>&1 || true
           }
-          download_direct nijiiro 'https://www.nijiiro-kids-taisou-labo.com/wp-content/uploads/2021/02/open-leg-jump-of-the-vaulting-box-1.mp4'
-          download_direct machida_T4 'https://machidabunkayouchien.com/wp/wp-content/uploads/2025/06/T4.mp4'
-          download_direct machida_T5 'https://machidabunkayouchien.com/wp/wp-content/uploads/2025/06/T5.mp4'
-          download_direct machida_T6 'https://machidabunkayouchien.com/wp/wp-content/uploads/2025/06/T6.mp4'
-          download_direct houei 'https://yukiyamafukushikai.com/houei/wp/wp-content/uploads/2022/01/IMG_3449-video-converter.com_.mp4'
-          find work/videos -type f -maxdepth 1 -printf '%f %s bytes\n' | sort | tee work/downloaded_files.txt
+          download_one vimeo_727072134 'https://vimeo.com/727072134'
+          download_one vimeo_428979571 'https://vimeo.com/428979571'
+          download_one vimeo_429194926 'https://vimeo.com/429194926'
+          download_one hos_grade9 'https://hos-junior.com/gymnastics-class-video/hos%E4%BD%93%E6%93%8D%E6%95%99%E5%AE%A4%E8%A6%8B%E6%9C%AC%E5%8B%95%E7%94%BB%E3%80%809%E7%B4%9A/'
+          download_one hos_grade10 'https://hos-junior.com/gymnastics-class-video/hos%E4%BD%93%E6%93%8D%E6%95%99%E5%AE%A4%E8%A6%8B%E6%9C%AC%E5%8B%95%E7%94%BB%E3%80%8010%E7%B4%9A/'
+          download_one hos_grade11 'https://hos-junior.com/gymnastics-class-video/hos%E4%BD%93%E6%93%8D%E6%95%99%E5%AE%A4%E8%A6%8B%E6%9C%AC%E5%8B%95%E7%94%BB%E3%80%8011%E7%B4%9A/'
+          find work/videos -maxdepth 1 -type f -printf '%f %s bytes\n' | sort | tee work/downloaded_files.txt
 
-      - name: Build lightweight visual previews
+      - name: Build compact contact sheets
         shell: bash
         run: |
           set -u
           mkdir -p work/result
           shopt -s nullglob
-          for f in work/videos/*.mp4; do
-            stem="$(basename "$f" .mp4)"
+          for f in work/videos/*; do
+            stem="$(basename "$f")"; stem="${stem%.*}"
             if ! ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$f" >"work/result/${stem}_duration.txt" 2>"work/result/${stem}_error.txt"; then
               continue
             fi
@@ -55,25 +61,24 @@ jobs:
               -q:v 2 "work/result/${stem}/contact_%02d.jpg" || true
             ffmpeg -hide_banner -loglevel error -i "$f" \
               -vf "fps=8,scale=640:-2:flags=lanczos" -an \
-              -c:v libx264 -crf 23 -preset veryfast -pix_fmt yuv420p \
+              -c:v libx264 -crf 22 -preset veryfast -pix_fmt yuv420p \
               "work/result/${stem}/${stem}_preview.mp4" || true
-            ffmpeg -hide_banner -loglevel error -ss 0 -i "$f" -frames:v 1 -vf "scale=960:-2:flags=lanczos" -q:v 2 \
-              "work/result/${stem}/${stem}_first.jpg" || true
           done
-          find work/result -type f -printf '%p %s bytes\n' | sort > work/result/file_list.txt
+          cp -r work/logs work/result/logs
+          cp work/downloaded_files.txt work/result/
           du -sh work/result
 
-      - name: Package candidate previews
+      - name: Package result
         run: |
           cd work
-          zip -r -q vault-candidate-previews.zip result logs downloaded_files.txt
-          ls -lh vault-candidate-previews.zip
+          zip -r -q vault-web-candidates.zip result
+          ls -lh vault-web-candidates.zip
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: vault-candidate-previews
-          path: work/vault-candidate-previews.zip
+          name: vault-web-candidates
+          path: work/vault-web-candidates.zip
           if-no-files-found: error
           retention-days: 1
           compression-level: 6
