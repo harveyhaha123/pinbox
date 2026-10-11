@@ -11,67 +11,121 @@ permissions:
 jobs:
   extract:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - name: Install tools
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq imagemagick curl jq
+          sudo apt-get install -y -qq ffmpeg curl jq
 
-      - name: Download YouTube storyboard sprites
+      - name: Resolve exact YouTube video with Innertube clients
         shell: bash
         run: |
           set -u
-          mkdir -p work/raw work/logs work/result
-          fetch_storyboards() {
-            name="$1"; id="$2"; mkdir -p "work/raw/$name" "work/result/$name"
-            : > "work/logs/$name.log"
-            for level in L0 L1 L2 L3; do
-              for m in $(seq 0 40); do
-                url="https://i.ytimg.com/sb/${id}/storyboard3_${level}/M${m}.jpg"
-                out="work/raw/${name}/${level}_M${m}.jpg"
-                code=$(curl -A 'Mozilla/5.0' -L --connect-timeout 10 --max-time 30 -sS -w '%{http_code}' "$url" -o "$out" || true)
-                size=$(wc -c < "$out" 2>/dev/null || echo 0)
-                echo "$level M$m HTTP $code bytes $size" >> "work/logs/$name.log"
-                if [ "$code" != "200" ] || [ "$size" -lt 1000 ]; then
-                  rm -f "$out"
-                  [ "$m" -ge 2 ] && break
-                fi
-              done
-            done
-            # Copy the highest available level to result and split 5x5 sprite tiles.
-            best=''
-            for level in L3 L2 L1 L0; do
-              if compgen -G "work/raw/${name}/${level}_M*.jpg" > /dev/null; then best="$level"; break; fi
-            done
-            echo "best_level=$best" >> "work/logs/$name.log"
-            [ -z "$best" ] && return 0
-            mkdir -p "work/result/$name/sprites" "work/result/$name/tiles"
-            cp work/raw/${name}/${best}_M*.jpg "work/result/$name/sprites/"
-            idx=0
-            for sprite in work/raw/${name}/${best}_M*.jpg; do
-              identify "$sprite" >> "work/logs/$name.log" 2>&1 || true
-              # YouTube storyboard sheets are usually 5x5. ImageMagick splits equal tiles.
-              convert "$sprite" -crop 5x5@ +repage +adjoin "work/result/$name/tiles/frame_${idx}_%02d.jpg" || true
-              idx=$((idx+1))
-            done
-            # Build an overview from all tiles.
-            montage work/result/$name/tiles/*.jpg -tile 5x -geometry +4+24 -background white "work/result/$name/overview.jpg" || true
+          mkdir -p work/player work/logs work/result
+          VID='X5IhQqZniuE'
+          UA_WEB='Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/15.5 Safari/605.1.15'
+          WATCH="https://www.youtube.com/watch?v=${VID}&hl=en&gl=US&has_verified=1&bpctr=9999999999"
+          curl -L -A "$UA_WEB" -H 'Cookie: CONSENT=YES+cb.20210328-17-p0.en+FX+417' --max-time 60 "$WATCH" -o work/watch.html 2>work/logs/watch.log || true
+          API_KEY=$(grep -o '"INNERTUBE_API_KEY":"[^"]*"' work/watch.html | head -1 | cut -d'"' -f4 || true)
+          [ -z "$API_KEY" ] && API_KEY='AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8'
+          echo "API_KEY length ${#API_KEY}" | tee work/logs/player_summary.log
+
+          call_player() {
+            stem="$1"; cname="$2"; cver="$3"; cnum="$4"; ua="$5"; extra="$6"
+            body=$(jq -nc --arg vid "$VID" --arg cn "$cname" --arg cv "$cver" --arg ua "$ua" --argjson extra "$extra" '
+              {videoId:$vid,contentCheckOk:true,racyCheckOk:true,context:{client:({clientName:$cn,clientVersion:$cv,userAgent:$ua,hl:"en",gl:"US"} + $extra)}}')
+            curl -sS -L --max-time 80 \
+              -A "$ua" -H 'Content-Type: application/json' \
+              -H "X-YouTube-Client-Name: $cnum" -H "X-YouTube-Client-Version: $cver" \
+              -H 'Origin: https://www.youtube.com' -H 'Referer: https://www.youtube.com/' \
+              --data "$body" "https://www.youtube.com/youtubei/v1/player?key=${API_KEY}&prettyPrint=false" \
+              -o "work/player/${stem}.json" 2>"work/logs/${stem}.log" || true
+            echo "=== $stem ===" | tee -a work/logs/player_summary.log
+            jq -r '[.playabilityStatus.status,.playabilityStatus.reason,.videoDetails.title,.videoDetails.lengthSeconds,(.streamingData.formats|length),(.streamingData.adaptiveFormats|length),.streamingData.hlsManifestUrl,.streamingData.dashManifestUrl] | @tsv' \
+              "work/player/${stem}.json" 2>/dev/null | tee -a work/logs/player_summary.log || true
           }
-          fetch_storyboards full_example 8nhKxitUuY8
-          fetch_storyboards exercise_3 DhsOuN6hU4c
-          find work/result -type f -printf '%p %s bytes\n' | sort > work/result/file_list.txt
+
+          call_player web_embedded WEB_EMBEDDED_PLAYER 2.20260708.00.00 56 "$UA_WEB" '{"thirdParty":{"embedUrl":"https://www.reddit.com/"}}'
+          call_player android ANDROID 21.26.364 3 'com.google.android.youtube/21.26.364 (Linux; U; Android 11) gzip' '{"androidSdkVersion":30,"osName":"Android","osVersion":"11"}'
+          call_player ios IOS 21.26.4 5 'com.google.ios.youtube/21.26.4 (iPhone16,2; U; CPU iOS 18_3_2 like Mac OS X;)' '{"deviceMake":"Apple","deviceModel":"iPhone16,2","osName":"iPhone","osVersion":"18.3.2.22D82"}'
+          call_player tv TVHTML5 7.20260707.07.00 7 'Mozilla/5.0 (ChromiumStylePlatform) Cobalt/25.lts.30.1034943-gold (unlike Gecko), Unknown_TV_Unknown_0/Unknown (Unknown, Unknown)' '{}'
+          call_player tv_simply TVHTML5_SIMPLY 1.0 75 'Mozilla/5.0' '{}'
+          call_player visionos VISIONOS 1.02 101 'Mozilla/5.0 (Macintosh; Intel Mac OS X 15_7_3) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15' '{"deviceMake":"Apple","deviceModel":"RealityDevice17,1","osName":"visionOS","osVersion":"26.5.23O471"}'
+
+          # Try HLS first, then progressive MP4, then separate MP4 video/audio.
+          found=''
+          for j in work/player/*.json; do
+            stem=$(basename "$j" .json)
+            hls=$(jq -r '.streamingData.hlsManifestUrl // empty' "$j" 2>/dev/null)
+            if [ -n "$hls" ]; then
+              echo "Trying HLS from $stem" | tee -a work/logs/download.log
+              ffmpeg -hide_banner -loglevel warning -user_agent "$UA_WEB" -headers $'Referer: https://www.youtube.com/\r\nOrigin: https://www.youtube.com\r\n' \
+                -i "$hls" -c copy -t 00:06:00 work/result/source.mp4 >>work/logs/download.log 2>&1 || true
+              if ffprobe -v error work/result/source.mp4 >/dev/null 2>&1; then found="hls:$stem"; break; fi
+              rm -f work/result/source.mp4
+            fi
+          done
+
+          if [ -z "$found" ]; then
+            for j in work/player/*.json; do
+              stem=$(basename "$j" .json)
+              url=$(jq -r '[.streamingData.formats[]? | select(.mimeType|startswith("video/mp4"))] | sort_by(.height,.bitrate) | last | .url // empty' "$j" 2>/dev/null)
+              if [ -n "$url" ]; then
+                echo "Trying progressive from $stem" | tee -a work/logs/download.log
+                curl -L --retry 2 --connect-timeout 20 --max-time 360 -A "$UA_WEB" -H 'Referer: https://www.youtube.com/' "$url" -o work/result/source.mp4 >>work/logs/download.log 2>&1 || true
+                if ffprobe -v error work/result/source.mp4 >/dev/null 2>&1; then found="progressive:$stem"; break; fi
+                rm -f work/result/source.mp4
+              fi
+            done
+          fi
+
+          if [ -z "$found" ]; then
+            for j in work/player/*.json; do
+              stem=$(basename "$j" .json)
+              vurl=$(jq -r '[.streamingData.adaptiveFormats[]? | select((.mimeType|startswith("video/mp4")) and (.url!=null))] | sort_by(.height,.fps,.bitrate) | last | .url // empty' "$j" 2>/dev/null)
+              aurl=$(jq -r '[.streamingData.adaptiveFormats[]? | select((.mimeType|startswith("audio/mp4")) and (.url!=null))] | sort_by(.bitrate) | last | .url // empty' "$j" 2>/dev/null)
+              if [ -n "$vurl" ] && [ -n "$aurl" ]; then
+                echo "Trying adaptive from $stem" | tee -a work/logs/download.log
+                curl -L --retry 2 --connect-timeout 20 --max-time 360 -A "$UA_WEB" -H 'Referer: https://www.youtube.com/' "$vurl" -o work/video.mp4 >>work/logs/download.log 2>&1 || true
+                curl -L --retry 2 --connect-timeout 20 --max-time 360 -A "$UA_WEB" -H 'Referer: https://www.youtube.com/' "$aurl" -o work/audio.m4a >>work/logs/download.log 2>&1 || true
+                if ffprobe -v error work/video.mp4 >/dev/null 2>&1 && ffprobe -v error work/audio.m4a >/dev/null 2>&1; then
+                  ffmpeg -hide_banner -loglevel error -i work/video.mp4 -i work/audio.m4a -c copy -shortest work/result/source.mp4 || true
+                  if ffprobe -v error work/result/source.mp4 >/dev/null 2>&1; then found="adaptive:$stem"; break; fi
+                fi
+                rm -f work/video.mp4 work/audio.m4a work/result/source.mp4
+              fi
+            done
+          fi
+          echo "FOUND=$found" | tee -a work/logs/download.log
+          find work/result -maxdepth 1 -type f -printf '%f %s bytes\n' | tee work/result/downloaded.txt
+
+      - name: Build inspection package
+        shell: bash
+        run: |
+          mkdir -p work/result/contact
+          if ffprobe -v error work/result/source.mp4 >/dev/null 2>&1; then
+            ffprobe -v error -print_format json -show_format -show_streams work/result/source.mp4 > work/result/metadata.json
+            # Whole-video inspection sheets, one sample per 2 seconds.
+            ffmpeg -hide_banner -loglevel error -i work/result/source.mp4 \
+              -vf "fps=0.5,scale=480:-2:flags=lanczos,pad=480:300:(ow-iw)/2:(oh-ih)/2:white,drawtext=text='%{pts\\:hms}':x=8:y=8:fontsize=20:fontcolor=white:borderw=2,tile=5x5" \
+              -q:v 2 work/result/contact/contact_%02d.jpg
+            ffmpeg -hide_banner -loglevel error -i work/result/source.mp4 \
+              -vf "fps=6,scale=960:-2:flags=lanczos" -an -c:v libx264 -crf 22 -preset veryfast -pix_fmt yuv420p work/result/inspection_preview.mp4
+          fi
+          cp -r work/player work/result/player_responses
           cp -r work/logs work/result/logs
+          find work/result -type f -printf '%p %s bytes\n' | sort > work/result/file_list.txt
 
       - name: Package result
         run: |
-          cd work && zip -r -q youtube-storyboards.zip result && ls -lh youtube-storyboards.zip
+          cd work && zip -r -q exact-youtube-inspection.zip result && ls -lh exact-youtube-inspection.zip
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: youtube-storyboards
-          path: work/youtube-storyboards.zip
+          name: exact-youtube-inspection
+          path: work/exact-youtube-inspection.zip
           if-no-files-found: error
           retention-days: 1
           compression-level: 1
