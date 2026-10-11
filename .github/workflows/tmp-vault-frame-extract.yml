@@ -11,76 +11,76 @@ permissions:
 jobs:
   extract:
     runs-on: ubuntu-latest
-    timeout-minutes: 12
+    timeout-minutes: 15
     steps:
       - name: Install tools
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq ffmpeg curl jq
+          sudo apt-get install -y -qq ffmpeg curl
+          python -m pip install --quiet --upgrade 'yt-dlp[default,curl-cffi]'
+          node --version || true
+          yt-dlp --version
 
-      - name: Fetch Vimeo player configs and progressive MP4s
+      - name: Download exact straddle-vault YouTube embeds
         shell: bash
         run: |
           set -u
-          mkdir -p work/configs work/videos work/logs
-          UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36'
-          for id in 727072134 428979571 429194926; do
-            echo "=== Vimeo $id ===" | tee "work/logs/${id}.log"
-            curl -v --fail --location --retry 2 --connect-timeout 20 --max-time 120 \
-              -A "$UA" -H 'Referer: https://vimeo.com/' -H 'Origin: https://vimeo.com' \
-              "https://player.vimeo.com/video/${id}/config" \
-              -o "work/configs/${id}.json" >>"work/logs/${id}.log" 2>&1 || true
+          mkdir -p work/videos work/logs
+          download_one() {
+            name="$1"; id="$2"
+            url="https://www.youtube.com/watch?v=${id}"
+            echo "===== $name : $url =====" | tee "work/logs/${name}.log"
+            yt-dlp -v --no-playlist --socket-timeout 30 --retries 5 \
+              --remote-components ejs:github \
+              --extractor-args 'youtube:player_client=web_safari,web,android_vr' \
+              -f 'bestvideo[height<=1080]+bestaudio/best[height<=1080]/best' \
+              --merge-output-format mp4 \
+              -o "work/videos/${name}.%(ext)s" "$url" \
+              >>"work/logs/${name}.log" 2>&1 || true
+          }
+          download_one full_example 8nhKxitUuY8
+          download_one exercise_1 8CJYLSbuvkE
+          download_one exercise_2 RVVSOgFm2AU
+          download_one exercise_3 DhsOuN6hU4c
+          download_one exercise_4 5hGOLhrfu9E
+          find work/videos -maxdepth 1 -type f -printf '%f %s bytes\n' | sort | tee work/downloaded_files.txt
 
-            if jq -e . "work/configs/${id}.json" >/dev/null 2>&1; then
-              jq '{video:.video, progressive:(.request.files.progressive // []), hls:.request.files.hls}' \
-                "work/configs/${id}.json" > "work/configs/${id}_summary.json" || true
-              url=$(jq -r '[.request.files.progressive[]? | select(.height <= 1080)] | sort_by(.height) | last | .url // empty' "work/configs/${id}.json")
-              if [ -n "$url" ]; then
-                echo "Downloading progressive URL: $url" >>"work/logs/${id}.log"
-                curl --fail --location --retry 3 --connect-timeout 20 --max-time 240 \
-                  -A "$UA" -H 'Referer: https://player.vimeo.com/' "$url" \
-                  -o "work/videos/vimeo_${id}.mp4" >>"work/logs/${id}.log" 2>&1 || true
-              fi
-            fi
-          done
-          find work -maxdepth 2 -type f -printf '%p %s bytes\n' | sort | tee work/file_list_before.txt
-
-      - name: Build visual previews
+      - name: Build visual contact sheets
         shell: bash
         run: |
+          set -u
           mkdir -p work/result
           shopt -s nullglob
-          for f in work/videos/*.mp4; do
-            stem="$(basename "$f" .mp4)"
-            if ! ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$f" >"work/result/${stem}_duration.txt"; then
+          for f in work/videos/*; do
+            stem="$(basename "$f")"; stem="${stem%.*}"
+            if ! ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$f" >"work/result/${stem}_duration.txt" 2>"work/result/${stem}_error.txt"; then
               continue
             fi
             mkdir -p "work/result/${stem}"
             ffprobe -v error -print_format json -show_format -show_streams "$f" >"work/result/${stem}/metadata.json"
             ffmpeg -hide_banner -loglevel error -i "$f" \
-              -vf "fps=5,scale=640:-2:flags=lanczos,pad=640:400:(ow-iw)/2:(oh-ih)/2:white,tile=4x4" \
-              -q:v 2 "work/result/${stem}/contact_%02d.jpg"
+              -vf "fps=8,scale=640:-2:flags=lanczos,pad=640:400:(ow-iw)/2:(oh-ih)/2:white,tile=4x4" \
+              -q:v 2 "work/result/${stem}/contact_%02d.jpg" || true
             ffmpeg -hide_banner -loglevel error -i "$f" \
-              -vf "fps=8,scale=640:-2:flags=lanczos" -an \
-              -c:v libx264 -crf 22 -preset veryfast -pix_fmt yuv420p \
-              "work/result/${stem}/${stem}_preview.mp4"
+              -vf "fps=12,scale=960:-2:flags=lanczos" -an \
+              -c:v libx264 -crf 20 -preset veryfast -pix_fmt yuv420p \
+              "work/result/${stem}/${stem}_preview.mp4" || true
           done
-          cp -r work/configs work/result/configs
           cp -r work/logs work/result/logs
-          cp work/file_list_before.txt work/result/
+          cp work/downloaded_files.txt work/result/
           du -sh work/result
 
       - name: Package result
         run: |
           cd work
-          zip -r -q vimeo-config-candidates.zip result
-          ls -lh vimeo-config-candidates.zip
+          zip -r -q youtube-vault-candidates.zip result
+          ls -lh youtube-vault-candidates.zip
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: vimeo-config-candidates
-          path: work/vimeo-config-candidates.zip
+          name: youtube-vault-candidates
+          path: work/youtube-vault-candidates.zip
           if-no-files-found: error
           retention-days: 1
           compression-level: 6
