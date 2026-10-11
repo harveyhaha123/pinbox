@@ -11,74 +11,76 @@ permissions:
 jobs:
   extract:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 12
     steps:
       - name: Install tools
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq ffmpeg
-          python -m pip install --quiet --upgrade 'yt-dlp[default,curl-cffi]'
-          yt-dlp --version
+          sudo apt-get install -y -qq ffmpeg curl jq
 
-      - name: Download Vimeo and HOS school-style vault candidates
+      - name: Fetch Vimeo player configs and progressive MP4s
         shell: bash
         run: |
           set -u
-          mkdir -p work/videos work/logs
-          download_one() {
-            name="$1"; url="$2"
-            echo "===== $name : $url =====" | tee "work/logs/${name}.log"
-            yt-dlp -v --no-playlist --socket-timeout 30 --retries 4 \
-              --impersonate chrome \
-              -f 'bestvideo[height<=1080]+bestaudio/best[height<=1080]/best' \
-              --merge-output-format mp4 \
-              -o "work/videos/${name}.%(ext)s" "$url" \
-              >>"work/logs/${name}.log" 2>&1 || true
-          }
-          download_one vimeo_727072134 'https://vimeo.com/727072134'
-          download_one vimeo_428979571 'https://vimeo.com/428979571'
-          download_one vimeo_429194926 'https://vimeo.com/429194926'
-          download_one hos_grade9 'https://hos-junior.com/gymnastics-class-video/hos%E4%BD%93%E6%93%8D%E6%95%99%E5%AE%A4%E8%A6%8B%E6%9C%AC%E5%8B%95%E7%94%BB%E3%80%809%E7%B4%9A/'
-          download_one hos_grade10 'https://hos-junior.com/gymnastics-class-video/hos%E4%BD%93%E6%93%8D%E6%95%99%E5%AE%A4%E8%A6%8B%E6%9C%AC%E5%8B%95%E7%94%BB%E3%80%8010%E7%B4%9A/'
-          download_one hos_grade11 'https://hos-junior.com/gymnastics-class-video/hos%E4%BD%93%E6%93%8D%E6%95%99%E5%AE%A4%E8%A6%8B%E6%9C%AC%E5%8B%95%E7%94%BB%E3%80%8011%E7%B4%9A/'
-          find work/videos -maxdepth 1 -type f -printf '%f %s bytes\n' | sort | tee work/downloaded_files.txt
+          mkdir -p work/configs work/videos work/logs
+          UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36'
+          for id in 727072134 428979571 429194926; do
+            echo "=== Vimeo $id ===" | tee "work/logs/${id}.log"
+            curl -v --fail --location --retry 2 --connect-timeout 20 --max-time 120 \
+              -A "$UA" -H 'Referer: https://vimeo.com/' -H 'Origin: https://vimeo.com' \
+              "https://player.vimeo.com/video/${id}/config" \
+              -o "work/configs/${id}.json" >>"work/logs/${id}.log" 2>&1 || true
 
-      - name: Build compact contact sheets
+            if jq -e . "work/configs/${id}.json" >/dev/null 2>&1; then
+              jq '{video:.video, progressive:(.request.files.progressive // []), hls:.request.files.hls}' \
+                "work/configs/${id}.json" > "work/configs/${id}_summary.json" || true
+              url=$(jq -r '[.request.files.progressive[]? | select(.height <= 1080)] | sort_by(.height) | last | .url // empty' "work/configs/${id}.json")
+              if [ -n "$url" ]; then
+                echo "Downloading progressive URL: $url" >>"work/logs/${id}.log"
+                curl --fail --location --retry 3 --connect-timeout 20 --max-time 240 \
+                  -A "$UA" -H 'Referer: https://player.vimeo.com/' "$url" \
+                  -o "work/videos/vimeo_${id}.mp4" >>"work/logs/${id}.log" 2>&1 || true
+              fi
+            fi
+          done
+          find work -maxdepth 2 -type f -printf '%p %s bytes\n' | sort | tee work/file_list_before.txt
+
+      - name: Build visual previews
         shell: bash
         run: |
-          set -u
           mkdir -p work/result
           shopt -s nullglob
-          for f in work/videos/*; do
-            stem="$(basename "$f")"; stem="${stem%.*}"
-            if ! ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$f" >"work/result/${stem}_duration.txt" 2>"work/result/${stem}_error.txt"; then
+          for f in work/videos/*.mp4; do
+            stem="$(basename "$f" .mp4)"
+            if ! ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$f" >"work/result/${stem}_duration.txt"; then
               continue
             fi
             mkdir -p "work/result/${stem}"
             ffprobe -v error -print_format json -show_format -show_streams "$f" >"work/result/${stem}/metadata.json"
             ffmpeg -hide_banner -loglevel error -i "$f" \
               -vf "fps=5,scale=640:-2:flags=lanczos,pad=640:400:(ow-iw)/2:(oh-ih)/2:white,tile=4x4" \
-              -q:v 2 "work/result/${stem}/contact_%02d.jpg" || true
+              -q:v 2 "work/result/${stem}/contact_%02d.jpg"
             ffmpeg -hide_banner -loglevel error -i "$f" \
               -vf "fps=8,scale=640:-2:flags=lanczos" -an \
               -c:v libx264 -crf 22 -preset veryfast -pix_fmt yuv420p \
-              "work/result/${stem}/${stem}_preview.mp4" || true
+              "work/result/${stem}/${stem}_preview.mp4"
           done
+          cp -r work/configs work/result/configs
           cp -r work/logs work/result/logs
-          cp work/downloaded_files.txt work/result/
+          cp work/file_list_before.txt work/result/
           du -sh work/result
 
       - name: Package result
         run: |
           cd work
-          zip -r -q vault-web-candidates.zip result
-          ls -lh vault-web-candidates.zip
+          zip -r -q vimeo-config-candidates.zip result
+          ls -lh vimeo-config-candidates.zip
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: vault-web-candidates
-          path: work/vault-web-candidates.zip
+          name: vimeo-config-candidates
+          path: work/vimeo-config-candidates.zip
           if-no-files-found: error
           retention-days: 1
           compression-level: 6
