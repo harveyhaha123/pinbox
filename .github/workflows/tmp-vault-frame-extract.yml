@@ -16,71 +16,128 @@ jobs:
       - name: Install tools
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq ffmpeg curl
-          python -m pip install --quiet --upgrade 'yt-dlp[default,curl-cffi]'
-          node --version || true
-          yt-dlp --version
+          sudo apt-get install -y -qq ffmpeg curl jq
 
-      - name: Download exact straddle-vault YouTube embeds
+      - name: Resolve public Piped or Invidious streams
         shell: bash
         run: |
           set -u
-          mkdir -p work/videos work/logs
-          download_one() {
+          mkdir -p work/videos work/logs work/json
+          PIPED=(
+            https://pipedapi.kavin.rocks
+            https://pipedapi.tokhmi.xyz
+            https://pipedapi.moomoo.me
+            https://pipedapi.syncpundit.io
+            https://api-piped.mha.fi
+            https://piped-api.garudalinux.org
+            https://pipedapi.adminforge.de
+            https://piped-api.hostux.net
+            https://pdapi.vern.cc
+          )
+          INVIDIOUS=(
+            https://inv.thepixora.com
+            https://inv.nadeko.net
+            https://invidious.nerdvpn.de
+            https://yt.chocolatemoo53.com
+            https://invidious.tiekoetter.com
+          )
+
+          fetch_one() {
             name="$1"; id="$2"
-            url="https://www.youtube.com/watch?v=${id}"
-            echo "===== $name : $url =====" | tee "work/logs/${name}.log"
-            yt-dlp -v --no-playlist --socket-timeout 30 --retries 5 \
-              --remote-components ejs:github \
-              --extractor-args 'youtube:player_client=web_safari,web,android_vr' \
-              -f 'bestvideo[height<=1080]+bestaudio/best[height<=1080]/best' \
-              --merge-output-format mp4 \
-              -o "work/videos/${name}.%(ext)s" "$url" \
-              >>"work/logs/${name}.log" 2>&1 || true
+            log="work/logs/${name}.log"
+            : > "$log"
+            echo "Video $name ($id)" | tee -a "$log"
+            found=''
+
+            for api in "${PIPED[@]}"; do
+              echo "Trying Piped $api" | tee -a "$log"
+              json="work/json/${name}_piped_$(echo "$api" | tr '/:.' '_').json"
+              code=$(curl -A 'Mozilla/5.0' -L --connect-timeout 8 --max-time 25 -sS -w '%{http_code}' \
+                "$api/streams/$id" -o "$json" || true)
+              echo "HTTP $code bytes $(wc -c < "$json" 2>/dev/null || echo 0)" >> "$log"
+              if jq -e '.videoStreams and (.videoStreams|length>0)' "$json" >/dev/null 2>&1; then
+                title=$(jq -r '.title // empty' "$json")
+                echo "Title: $title" >> "$log"
+                url=$(jq -r '[.videoStreams[] | select(.mimeType=="video/mp4")] | sort_by(.height, .bitrate) | last | .url // empty' "$json")
+                if [ -z "$url" ]; then
+                  url=$(jq -r '[.videoStreams[]] | sort_by(.height, .bitrate) | last | .url // empty' "$json")
+                fi
+                if [ -n "$url" ]; then
+                  echo "Resolved Piped stream via $api" | tee -a "$log"
+                  if curl -A 'Mozilla/5.0' -L --connect-timeout 12 --max-time 300 --retry 2 \
+                    "$url" -o "work/videos/${name}.mp4" >> "$log" 2>&1; then
+                    if ffprobe -v error "work/videos/${name}.mp4" >/dev/null 2>&1; then
+                      found='yes'; break
+                    fi
+                  fi
+                  rm -f "work/videos/${name}.mp4"
+                fi
+              fi
+            done
+
+            if [ -z "$found" ]; then
+              for api in "${INVIDIOUS[@]}"; do
+                echo "Trying Invidious $api" | tee -a "$log"
+                json="work/json/${name}_inv_$(echo "$api" | tr '/:.' '_').json"
+                code=$(curl -A 'Mozilla/5.0' -L --connect-timeout 8 --max-time 25 -sS -w '%{http_code}' \
+                  "$api/api/v1/videos/$id?local=true" -o "$json" || true)
+                echo "HTTP $code bytes $(wc -c < "$json" 2>/dev/null || echo 0)" >> "$log"
+                if jq -e '.formatStreams and (.formatStreams|length>0)' "$json" >/dev/null 2>&1; then
+                  url=$(jq -r '[.formatStreams[] | select(.container=="mp4")] | sort_by(.height) | last | .url // empty' "$json")
+                  [ -z "$url" ] && url=$(jq -r '.formatStreams[-1].url // empty' "$json")
+                  if [ -n "$url" ]; then
+                    echo "Resolved Invidious stream via $api" | tee -a "$log"
+                    if curl -A 'Mozilla/5.0' -L --connect-timeout 12 --max-time 300 --retry 2 \
+                      "$url" -o "work/videos/${name}.mp4" >> "$log" 2>&1; then
+                      if ffprobe -v error "work/videos/${name}.mp4" >/dev/null 2>&1; then
+                        found='yes'; break
+                      fi
+                    fi
+                    rm -f "work/videos/${name}.mp4"
+                  fi
+                fi
+              done
+            fi
+            echo "found=$found" | tee -a "$log"
           }
-          download_one full_example 8nhKxitUuY8
-          download_one exercise_1 8CJYLSbuvkE
-          download_one exercise_2 RVVSOgFm2AU
-          download_one exercise_3 DhsOuN6hU4c
-          download_one exercise_4 5hGOLhrfu9E
+
+          fetch_one full_example 8nhKxitUuY8
+          fetch_one exercise_3 DhsOuN6hU4c
           find work/videos -maxdepth 1 -type f -printf '%f %s bytes\n' | sort | tee work/downloaded_files.txt
 
-      - name: Build visual contact sheets
+      - name: Build visual previews
         shell: bash
         run: |
-          set -u
           mkdir -p work/result
           shopt -s nullglob
-          for f in work/videos/*; do
-            stem="$(basename "$f")"; stem="${stem%.*}"
-            if ! ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "$f" >"work/result/${stem}_duration.txt" 2>"work/result/${stem}_error.txt"; then
-              continue
-            fi
+          for f in work/videos/*.mp4; do
+            stem="$(basename "$f" .mp4)"
             mkdir -p "work/result/${stem}"
             ffprobe -v error -print_format json -show_format -show_streams "$f" >"work/result/${stem}/metadata.json"
             ffmpeg -hide_banner -loglevel error -i "$f" \
-              -vf "fps=8,scale=640:-2:flags=lanczos,pad=640:400:(ow-iw)/2:(oh-ih)/2:white,tile=4x4" \
-              -q:v 2 "work/result/${stem}/contact_%02d.jpg" || true
+              -vf "fps=6,scale=800:-2:flags=lanczos,pad=800:500:(ow-iw)/2:(oh-ih)/2:white,tile=4x4" \
+              -q:v 2 "work/result/${stem}/contact_%02d.jpg"
             ffmpeg -hide_banner -loglevel error -i "$f" \
               -vf "fps=12,scale=960:-2:flags=lanczos" -an \
               -c:v libx264 -crf 20 -preset veryfast -pix_fmt yuv420p \
-              "work/result/${stem}/${stem}_preview.mp4" || true
+              "work/result/${stem}/${stem}_preview.mp4"
           done
           cp -r work/logs work/result/logs
+          cp -r work/json work/result/json
           cp work/downloaded_files.txt work/result/
-          du -sh work/result
+          find work/result -type f -printf '%p %s bytes\n' | sort > work/result/file_list.txt
 
       - name: Package result
         run: |
           cd work
-          zip -r -q youtube-vault-candidates.zip result
-          ls -lh youtube-vault-candidates.zip
+          zip -r -q piped-vault-candidates.zip result
+          ls -lh piped-vault-candidates.zip
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: youtube-vault-candidates
-          path: work/youtube-vault-candidates.zip
+          name: piped-vault-candidates
+          path: work/piped-vault-candidates.zip
           if-no-files-found: error
           retention-days: 1
-          compression-level: 6
+          compression-level: 3
